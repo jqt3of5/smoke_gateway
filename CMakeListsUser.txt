@@ -1,0 +1,3 @@
+include_directories("${CMAKE_CURRENT_LIST_DIR}/lib/home_assistant/include")
+include_directories("${CMAKE_CURRENT_LIST_DIR}/lib/nrf24l01")
+
