@@ -3,9 +3,7 @@
 #include <HAMqtt.h>
 #include <ArduinoOTA.h>
 #include <HABinarySensor.h>
-#include <HASwitch.h>
 #include <WiFiClient.h>
-#include <SPI.h>
 #include "RF24.h"
 
 WiFiClient client;
@@ -20,10 +18,12 @@ uint8_t address [] = {0x96,0xb6, 0xd9, 0xca, 0x60};
 HASensor * probe1_temp = new HASensor("smoke1_probe1_temp");
 HASensor * probe1_alarm_high = new HASensor("smoke1_probe1_alarm_high");
 HASensor * probe1_alarm_low = new HASensor("smoke1_probe1_alarm_low");
+HABinarySensor * probe1_alarm = new HABinarySensor("smoke1_probe1_alarm", false);
 
 HASensor * probe2_temp = new HASensor("smoke1_probe2_temp");
 HASensor * probe2_alarm_high = new HASensor("smoke1_probe2_alarm_high");
 HASensor * probe2_alarm_low = new HASensor("smoke1_probe2_alarm_low");
+HABinarySensor * probe2_alarm = new HABinarySensor("smoke1_probe2_alarm", false);
 
 RF24 radio(22, 5);
 
@@ -57,6 +57,9 @@ void configure_smoke() {
     probe1_alarm_low->setName("Smoke Probe 1 alarm low");
     probe1_alarm_low->setDeviceClass("temperature");
 
+    probe1_alarm->setName("Smoke Probe 1 alarm state");
+    probe1_alarm->setAvailability(true);
+
     probe2_temp->setName("Smoke Probe 2");
     probe2_temp->setDeviceClass("temperature");
 
@@ -65,6 +68,9 @@ void configure_smoke() {
 
     probe2_alarm_low->setName("Smoke Probe 2 alarm low");
     probe2_alarm_low->setDeviceClass("temperature");
+
+    probe2_alarm->setName("Smoke Probe 2 alarm state");
+    probe2_alarm->setAvailability(true);
 
     probe1_temp->setUnitOfMeasurement("°F");
     probe1_alarm_high->setUnitOfMeasurement("°F");
@@ -84,8 +90,28 @@ void configure_smoke() {
 
     radio.setCRCLength(RF24_CRC_16);
 
+
     radio.disableDynamicPayloads();
     radio.setAutoAck(false);
+
+
+//  Promiscuous mode
+//  When we set the address width to 2 with this library, it sets the SETUP_AW register on the nrf24 to "0"
+//   according to the datasheet, this is an illegal value. HOWEVER, some smart people figured out that it's not actually illegal.
+//   Instead of the normal matching for preamble/address it will start matching 2 bytes. And if it finds those two, it will begin reading up to
+//   the specified payload size.
+//
+//   It's important for CRC to be turned off so the radio doesn't reject the transmission,
+//      and setAutoAck(false) must be called first (Otherwise you can't turn off crcs)
+//   The first byte(s) of a transmission are usually a preamble (alternating 1/0). So we'll set 0x00aa as our 2 byte match (address is written LSB first)
+//   Then the 5 byte address of the device you're searching for will be inside of the payload
+//   You'll get a lot of noise. I would search through the results to find a regularly occuring address, and assumed that was the one I was looking for.
+//   the preamble is guranteed to be 8 bits either. It could be multiple bytes long, or in my case seemed to be an odd number of bits (11?)
+//   So once you have your suspected payload, you'll need to do a little bit shifting to find which bit starts the 5 byte address.
+
+//    radio.disableCRC();
+//    uint8_t address[3] = {0xaa, 0x00};
+//    radio.setAddressWidth(2);
 
     radio.setChannel(70);
     int channel = radio.getChannel();
@@ -93,10 +119,6 @@ void configure_smoke() {
 
     radio.setDataRate(RF24_250KBPS);
 
-//  Promiscuous mode
-//    radio.disableCRC();
-//    uint8_t address[3] = {0xaa, 0x00};
-//    radio.setAddressWidth(2);
 
     radio.setAddressWidth(5);
     radio.openReadingPipe(1, address);
@@ -186,6 +208,8 @@ void loop() {
                 probe1_temp->setAvailability(false);
             }
 
+            probe1_alarm->setState(!smoke->alarm1);
+
             probe1_alarm_high->setValue(smoke->probe1High/10.0);
             probe1_alarm_low->setValue(smoke->probe1Low/10.0);
 
@@ -199,6 +223,7 @@ void loop() {
             probe2_alarm_high->setValue(smoke->probe2High/10.0);
             probe2_alarm_low->setValue(smoke->probe2Low/10.0);
 
+            probe2_alarm->setState(!smoke->alarm2);
         }
     }
 }
