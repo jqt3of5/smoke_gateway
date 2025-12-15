@@ -4,6 +4,7 @@
 #include <ArduinoOTA.h>
 #include <HABinarySensor.h>
 #include <WiFiClient.h>
+#include <esp_task_wdt.h>
 #include "RF24.h"
 
 WiFiClient client;
@@ -13,9 +14,16 @@ HAMqtt mqtt(client, device);
 const char * ssid = "WaitingOnComcast";
 const char * pwd = "";
 const char * mqtt_host = "tiltpi.equationoftime.tech";
+const int WDT_TIMEOUT = 3;
 
 uint8_t address [] = {0x96,0xb6, 0xd9, 0xca, 0x60};
+
+HASensor * smoke_last_transmission = new HASensor("smoke1_last_transmission_time");
+HASensor * smoke_uptime = new HASensor("smoke1_uptime");
+HABinarySensor * smoke_connected = new HABinarySensor("smoke1_connected", false);
+
 HASensor * probe1_temp = new HASensor("smoke1_probe1_temp");
+HABinarySensor * probe1 = new HABinarySensor("smoke1_probe1_connected", false);
 HASensor * probe1_alarm_high = new HASensor("smoke1_probe1_alarm_high");
 HASensor * probe1_alarm_low = new HASensor("smoke1_probe1_alarm_low");
 HABinarySensor * probe1_alarm = new HABinarySensor("smoke1_probe1_alarm", false);
@@ -24,6 +32,7 @@ HASensor * probe2_temp = new HASensor("smoke1_probe2_temp");
 HASensor * probe2_alarm_high = new HASensor("smoke1_probe2_alarm_high");
 HASensor * probe2_alarm_low = new HASensor("smoke1_probe2_alarm_low");
 HABinarySensor * probe2_alarm = new HABinarySensor("smoke1_probe2_alarm", false);
+HABinarySensor * probe2 = new HABinarySensor("smoke1_probe2_connected", false);
 
 RF24 radio(22, 5);
 
@@ -48,7 +57,13 @@ struct Smoke_t {
 
 void configure_smoke() {
     Serial.println("Starting nRF24l0a+");
-    probe1_temp->setName("Smoke Probe 1");
+
+    smoke_connected->setName("Smoke Connected");
+    smoke_last_transmission->setName("Smoke Last Transmission");
+    smoke_uptime->setName("Smoke Uptime");
+
+    probe1->setName("Smoke Probe 1");
+    probe1_temp->setName("Smoke Probe 1 Temp");
     probe1_temp->setDeviceClass("temperature");
 
     probe1_alarm_high->setName("Smoke Probe 1 alarm high");
@@ -58,9 +73,9 @@ void configure_smoke() {
     probe1_alarm_low->setDeviceClass("temperature");
 
     probe1_alarm->setName("Smoke Probe 1 alarm state");
-    probe1_alarm->setAvailability(true);
 
-    probe2_temp->setName("Smoke Probe 2");
+    probe2->setName("Smoke Probe 2");
+    probe2_temp->setName("Smoke Probe 2 Temp");
     probe2_temp->setDeviceClass("temperature");
 
     probe2_alarm_high->setName("Smoke Probe 2 alarm high");
@@ -70,7 +85,6 @@ void configure_smoke() {
     probe2_alarm_low->setDeviceClass("temperature");
 
     probe2_alarm->setName("Smoke Probe 2 alarm state");
-    probe2_alarm->setAvailability(true);
 
     probe1_temp->setUnitOfMeasurement("°F");
     probe1_alarm_high->setUnitOfMeasurement("°F");
@@ -90,10 +104,8 @@ void configure_smoke() {
 
     radio.setCRCLength(RF24_CRC_16);
 
-
     radio.disableDynamicPayloads();
     radio.setAutoAck(false);
-
 
 //  Promiscuous mode
 //  When we set the address width to 2 with this library, it sets the SETUP_AW register on the nrf24 to "0"
@@ -106,8 +118,9 @@ void configure_smoke() {
 //   The first byte(s) of a transmission are usually a preamble (alternating 1/0). So we'll set 0x00aa as our 2 byte match (address is written LSB first)
 //   Then the 5 byte address of the device you're searching for will be inside of the payload
 //   You'll get a lot of noise. I would search through the results to find a regularly occuring address, and assumed that was the one I was looking for.
-//   the preamble is guranteed to be 8 bits either. It could be multiple bytes long, or in my case seemed to be an odd number of bits (11?)
-//   So once you have your suspected payload, you'll need to do a little bit shifting to find which bit starts the 5 byte address.
+//   the preamble is not guaranteed to be 8 bits either. It could be multiple bytes long, or in my case seemed to be an odd number of bits (11?)
+//   So once you have your suspected payload, you'll need to do a little bit shifting to find which bit starts the 5 byte address. The first byte of the payload for the smoke
+//   was the LSB of the probe 1 temperature.This made it easy, because I could isolate the 5 bytes between the last 0xaa and the first byte that would change.
 
 //    radio.disableCRC();
 //    uint8_t address[3] = {0xaa, 0x00};
@@ -129,6 +142,10 @@ void configure_smoke() {
 }
 
 void setup() {
+
+    esp_task_wdt_init(WDT_TIMEOUT, true);
+    esp_task_wdt_add(NULL);
+
     Serial.begin(115200);
     while (!Serial) { // needed to keep leonardo/micro from starting too fast!
         delay(10);
@@ -165,11 +182,15 @@ void setup() {
         mqtt.loop();
         delay(500);
     }
-
+    smoke_uptime->setValue((uint32_t)millis());
+    smoke_last_transmission->setValue(-1);
 }
 
-unsigned long lastReadTime = 0;
+uint32_t lastReadTime = 0;
+uint32_t lastTransmissionTime = 0;
 void loop() {
+
+    esp_task_wdt_reset();
 
     if (!client.connected())
     {
@@ -181,49 +202,48 @@ void loop() {
         esp_restart();
     }
 
-    if (millis() - lastReadTime > 240000)
+    if (millis() - lastTransmissionTime > 240000)
     {
-        probe1_temp->setAvailability(false);
-        probe2_temp->setAvailability(false);
+        smoke_connected->setState(false);
     }
 
     if (millis() - lastReadTime > 5000)
     {
+        lastReadTime = millis();
+        smoke_uptime->setValue((uint32_t)lastReadTime);
         uint8_t payload[25] ={0};
         uint8_t pipe;
         if (radio.available(&pipe))
         {
-            lastReadTime = millis();
+            lastTransmissionTime = millis();
+            smoke_last_transmission->setValue((uint32_t)lastTransmissionTime);
+            smoke_connected->setState(true);
+
             uint8_t bytes = radio.getPayloadSize();  // get the size of the payload
             Serial.printf("bytes: %d\n", bytes);
             radio.read(&payload, bytes);             // fetch payload from FIFO
             Smoke_t * smoke = (Smoke_t*)payload;
 
+            probe1->setState(!smoke->probe1);
             if (!smoke->probe1)
             {
-                probe1_temp->setAvailability(true);
                 probe1_temp->setValue(smoke->probe1Temp/10.0);
-
-            } else {
-                probe1_temp->setAvailability(false);
             }
 
-            probe1_alarm->setState(!smoke->alarm1);
+            probe1_alarm->setState(smoke->alarm1);
 
             probe1_alarm_high->setValue(smoke->probe1High/10.0);
             probe1_alarm_low->setValue(smoke->probe1Low/10.0);
 
+            probe2->setState(!smoke->probe2);
             if (!smoke->probe2)
             {
                 probe2_temp->setValue(smoke->probe2Temp/10.0);
             }
-            else {
-                probe2_temp->setAvailability(false);
-            }
             probe2_alarm_high->setValue(smoke->probe2High/10.0);
             probe2_alarm_low->setValue(smoke->probe2Low/10.0);
 
-            probe2_alarm->setState(!smoke->alarm2);
+            probe2_alarm->setState(smoke->alarm2);
         }
     }
 }
